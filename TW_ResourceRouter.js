@@ -1,4 +1,4 @@
-// TW Resource Router v2.4.0 — Made by Sotnos
+// TW Resource Router v2.5.0 — Made by Sotnos
 // Quickbar: javascript:$.getScript('https://cdn.jsdelivr.net/gh/sotnos-hub/TW-Resource-sender@main/TW_ResourceRouter.js');
 
 (function () {
@@ -9,15 +9,15 @@
     return;
   }
 
-  const SCRIPT_KEY   = 'tw_resource_router_v2';
-  const TRADER_CARRY = 1000;
-  const LOG_MAX      = 100;
+  var SCRIPT_KEY   = 'tw_resource_router_v2';
+  var TRADER_CARRY = 1000;
+  var LOG_MAX      = 100;
 
   function lsGet(key, fb) { try { return localStorage.getItem(key) || fb; } catch(e) { return fb; } }
   function lsSet(key, v)  { try { localStorage.setItem(key, v); } catch(e) {} }
 
-  let settings   = loadSettings();
-  let logEntries = [];
+  var settings   = loadSettings();
+  var logEntries = [];
 
   function loadSettings() {
     try { return JSON.parse(lsGet(SCRIPT_KEY, 'null')) || defaultSettings(); }
@@ -27,7 +27,6 @@
   function defaultSettings() {
     return {
       targetCoords:   (window.game_data && window.game_data.village) ? window.game_data.village.coord : '',
-      groupId:        '0',
       reserveWood:    5000,
       reserveClay:    5000,
       reserveIron:    5000,
@@ -68,124 +67,154 @@
     document.head.appendChild(el);
   }
   function getCurrentVillageId() {
-    return (window.game_data && window.game_data.village) ? window.game_data.village.id : null;
+    return window.game_data.village.id;
   }
 
-  // ── Village fetching: scrape overview_villages HTML (only method that works) ──
-  function fetchGroupVillages(groupId) {
-    return new Promise(function(resolve) {
-      var vid = getCurrentVillageId();
-      // group=0 means all villages on this server
-      var url = '/game.php?village=' + vid + '&screen=overview_villages&mode=combined' +
-                (groupId && groupId !== '0' ? '&group=' + groupId : '');
-
-      addLog('Fetching village list from overview page...', 'info');
-      $.ajax({ url: url, success: function(html) {
-        var villages = scrapeVillagesFromOverview(html);
-        if (villages.length > 0) {
-          addLog('Found ' + villages.length + ' villages in overview.', 'info');
-          resolve(villages);
-        } else {
-          // Fallback: just use current village
-          addLog('WARNING: Could not parse villages from overview. Using current village only.', 'warn');
-          var gd = window.game_data;
-          resolve([{ id: gd.village.id, name: gd.village.name, coord: gd.village.coord }]);
-        }
-      }, error: function() {
-        addLog('ERROR: Could not load overview page. Using current village only.', 'error');
-        var gd = window.game_data;
-        resolve([{ id: gd.village.id, name: gd.village.name, coord: gd.village.coord }]);
-      }});
-    });
-  }
-
-  // Scrape village table from the overview_villages combined page.
-  // Debug showed rows like: "Braverock (564|418) K45" with links containing village=XXXXX
-  function scrapeVillagesFromOverview(html) {
-    var doc = new DOMParser().parseFromString(html, 'text/html');
+  // ── Extract villages from TribalWars.updateGameData() embedded in page HTML ──
+  // This is called on EVERY TW page and contains the full village list.
+  function extractVillagesFromPageScript(html) {
     var villages = [];
-    var seen = {};
+    // The overview page embeds all villages in TribalWars.updateGameData({...})
+    // Village list appears as: "player":{"villages":"18",...} and then a villages array
+    // We look for the pattern used in the overview page script block
+    var patterns = [
+      // Pattern: Villages array in updateGameData
+      /TribalWars\.updateGameData\((\{[\s\S]*?\})\)/g,
+      // Pattern: direct villages array assignment
+      /"villages"\s*:\s*(\[[\s\S]*?\])/g,
+      // Pattern: VillageList or similar
+      /village_list\s*=\s*(\[[\s\S]*?\]);/g,
+    ];
 
-    // Primary: find all <a href> links containing village= and extract coord from row text
-    doc.querySelectorAll('a[href*="village="]').forEach(function(a) {
-      var vidM = (a.href || '').match(/[?&]village=(\d+)/);
-      if (!vidM) return;
-      var villageId = parseInt(vidM[1]);
-      if (seen[villageId]) return;
+    // Try to find villages array embedded as JSON
+    var villageArrayMatch = html.match(/"(\d+)"\s*:\s*\{\s*"id"\s*:\s*"?\d+"?,\s*"name"\s*:/g);
+    if (villageArrayMatch) {
+      // Try full JSON extraction around this area
+      var idx = html.indexOf('"id":"' + getCurrentVillageId());
+      if (idx === -1) idx = html.indexOf('"id":' + getCurrentVillageId());
+    }
 
-      // Get the row text to find coords
-      var row = a.closest('tr') || a.parentElement;
-      var rowText = row ? row.textContent : a.textContent;
-      var coordM = rowText.match(/(\d{3,})\|(\d{3,})/);
-      if (!coordM) {
-        // Try to get coord from the link text itself e.g. "Braverock (564|418)"
-        coordM = (a.textContent || '').match(/(\d{3,})\|(\d{3,})/);
+    // Most reliable: find all occurrences of coord pattern "XXX|YYY" near village ids in scripts
+    var scriptBlocks = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
+    scriptBlocks.forEach(function(block) {
+      // Look for village objects: {id:XXXXX, name:"...", x:XXX, y:YYY} or similar
+      var matches = block.match(/\{[^{}]*"x"\s*:\s*\d+[^{}]*"y"\s*:\s*\d+[^{}]*\}/g) || [];
+      matches.forEach(function(obj) {
+        try {
+          // Clean up and parse
+          var clean = obj.replace(/(\w+)\s*:/g, '"$1":').replace(/""/g, '"');
+          var v = JSON.parse(clean);
+          if (v.id && v.x && v.y) {
+            villages.push({
+              id: parseInt(v.id),
+              name: v.name || ('Village ' + v.id),
+              coord: v.x + '|' + v.y
+            });
+          }
+        } catch(e) {}
+      });
+
+      // Also try: villages listed as id|name|x|y in arrays
+      var twData = block.match(/updateGameData\(\s*(\{[\s\S]*\})\s*\)/);
+      if (twData) {
+        try {
+          var data = JSON.parse(twData[1]);
+          if (data.villages && Array.isArray(data.villages)) {
+            data.villages.forEach(function(v) {
+              villages.push({
+                id: parseInt(v.id || v.village_id),
+                name: v.name || ('Village ' + v.id),
+                coord: (v.coord || (v.x + '|' + v.y))
+              });
+            });
+          }
+        } catch(e) {}
       }
-      if (!coordM) return; // skip non-village links (menu items etc)
-
-      var coord = coordM[1] + '|' + coordM[2];
-      // Village name: text of the link, strip coord and kingdom suffix
-      var name = a.textContent.replace(/\(\d+\|\d+\).*/, '').replace(/\s+/g, ' ').trim();
-      if (!name) name = 'Village ' + villageId;
-
-      seen[villageId] = true;
-      villages.push({ id: villageId, name: name, coord: coord });
     });
 
     return villages;
   }
 
-  // ── Group fetching: scrape group tabs/links from the overview page ────────
-  function getGroups() {
+  // ── Scrape village rows from the overview table (proven to work in debug) ──
+  function scrapeVillageTable(html) {
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var villages = [];
+    var seen = {};
+
+    // The debug showed rows like "Braverock (564|418) K45" with <a href="...village=XXXXX...">
+    // We scan ALL anchor tags that have a village= param and a coordinate in their row
+    var anchors = doc.querySelectorAll('a[href*="village="]');
+    anchors.forEach(function(a) {
+      var hrefM = (a.getAttribute('href') || '').match(/[?&]village=(\d+)/);
+      if (!hrefM) return;
+      var vid = parseInt(hrefM[1]);
+      if (seen[vid]) return;
+
+      // Get surrounding text — check the anchor itself, then its parent chain up to tr
+      var texts = [a.textContent];
+      var el = a.parentElement;
+      for (var i = 0; i < 4 && el; i++) {
+        texts.push(el.textContent);
+        el = el.parentElement;
+      }
+
+      var coord = null;
+      for (var t = 0; t < texts.length; t++) {
+        var cm = texts[t].match(/(\d{3})\|(\d{3})/);
+        if (cm) { coord = cm[1] + '|' + cm[2]; break; }
+      }
+      if (!coord) return;
+
+      // Name = anchor text, cleaned up
+      var name = a.textContent.replace(/\(\d+\|\d+\).*/, '').trim();
+      if (!name || name.length < 1) name = 'Village ' + vid;
+
+      seen[vid] = true;
+      villages.push({ id: vid, name: name, coord: coord });
+    });
+
+    return villages;
+  }
+
+  // ── Main village fetcher: tries overview page, then combined mode ─────────
+  function fetchAllVillages() {
     return new Promise(function(resolve) {
       var vid = getCurrentVillageId();
-      $.ajax({ url: '/game.php?village=' + vid + '&screen=overview_villages&mode=combined',
-        success: function(html) {
-          var doc = new DOMParser().parseFromString(html, 'text/html');
-          var groups = [];
 
-          // Method A: group select dropdown
-          var sel = doc.querySelector('select[name="group"]') || doc.querySelector('#group_id') || doc.querySelector('select.group_selector');
-          if (sel) {
-            sel.querySelectorAll('option').forEach(function(o) {
-              groups.push({ id: o.value, group_id: o.value, name: o.textContent.trim() });
-            });
+      function tryURL(url, label, cb) {
+        addLog('Trying ' + label + '...', 'info');
+        $.ajax({ url: url, success: function(html) { cb(html); }, error: function() { cb(null); } });
+      }
+
+      // Try 1: overview_villages (this is what worked in debug for coords)
+      tryURL('/game.php?village=' + vid + '&screen=overview_villages', 'overview_villages', function(html) {
+        if (html) {
+          var v1 = scrapeVillageTable(html);
+          if (v1.length > 0) { addLog('Found ' + v1.length + ' villages via overview_villages.', 'info'); return resolve(v1); }
+        }
+
+        // Try 2: combined mode (this is what the debug "ally/group" button used — showed 21 rows)
+        tryURL('/game.php?village=' + vid + '&screen=overview_villages&mode=combined', 'overview_villages combined', function(html2) {
+          if (html2) {
+            var v2 = scrapeVillageTable(html2);
+            if (v2.length > 0) { addLog('Found ' + v2.length + ' villages via combined mode.', 'info'); return resolve(v2); }
+            // Also try embedded script data
+            var v2b = extractVillagesFromPageScript(html2);
+            if (v2b.length > 0) { addLog('Found ' + v2b.length + ' villages via page script data.', 'info'); return resolve(v2b); }
           }
 
-          // Method B: group links/tabs (TW sometimes shows them as tabs)
-          if (groups.length === 0) {
-            doc.querySelectorAll('a[href*="group="], a[href*="group_id="]').forEach(function(a) {
-              var m = (a.href || '').match(/group(?:_id)?=(\d+)/);
-              if (m) {
-                var name = a.textContent.trim();
-                if (name && !groups.find(function(g){ return g.id === m[1]; })) {
-                  groups.push({ id: m[1], group_id: m[1], name: name });
-                }
-              }
-            });
-          }
-
-          // Method C: look for group data embedded in page scripts
-          if (groups.length === 0) {
-            var scripts = doc.querySelectorAll('script');
-            for (var i = 0; i < scripts.length; i++) {
-              var src = scripts[i].textContent || '';
-              var m = src.match(/"groups"\s*:\s*(\[[\s\S]*?\])/);
-              if (m) {
-                try {
-                  var parsed = JSON.parse(m[1]);
-                  parsed.forEach(function(g) {
-                    groups.push({ id: g.group_id || g.id, group_id: g.group_id || g.id, name: g.name });
-                  });
-                  break;
-                } catch(e) {}
-              }
+          // Try 3: plain overview
+          tryURL('/game.php?village=' + vid + '&screen=overview', 'overview', function(html3) {
+            if (html3) {
+              var v3 = scrapeVillageTable(html3);
+              if (v3.length > 0) { addLog('Found ' + v3.length + ' villages via overview.', 'info'); return resolve(v3); }
             }
-          }
 
-          resolve(groups);
-        },
-        error: function() { resolve([]); }
+            // Last resort: just current village
+            addLog('WARNING: Could only find current village. Make sure you are on the game page.', 'warn');
+            resolve([{ id: window.game_data.village.id, name: window.game_data.village.name, coord: window.game_data.village.coord }]);
+          });
+        });
       });
     });
   }
@@ -201,14 +230,13 @@
           var avail = txt('#market_merchant_available_count');
           var total = txt('#market_merchant_total');
 
-          // Fallback: scan for "X/Y" merchant pattern in page text
+          // Fallback: scan visible text for "X/Y merchants" pattern
           if (total === 0) {
-            var m = html.match(/(\d+)\s*\/\s*(\d+)/g);
-            // Look near the word "merchant" or "Kaufleute" or "handlare"
-            var merchantBlock = html.match(/(?:merchant|Kaufleut|handlar)[^<]{0,200}/i);
-            if (merchantBlock) {
-              var nm = merchantBlock[0].match(/(\d+)\s*\/\s*(\d+)/);
-              if (nm) { avail = parseInt(nm[1]); total = parseInt(nm[2]); }
+            var bodyText = doc.body ? doc.body.innerHTML : html;
+            var nm = bodyText.match(/(\d+)\s*<[^>]*>\s*\/\s*<[^>]*>\s*(\d+)|(\d+)\s*\/\s*(\d+)\s*(?:Kaufleut|merchant|handlar)/i);
+            if (nm) {
+              avail = parseInt(nm[1] || nm[3]) || 0;
+              total = parseInt(nm[2] || nm[4]) || 0;
             }
           }
 
@@ -230,7 +258,10 @@
     return new Promise(function(resolve) {
       $.ajax({ url: '/game.php?village=' + villageId + '&screen=market&mode=send',
         success: function(html) {
-          var m = html.match(/name="h" value="([^"]+)"/);
+          // Try multiple token field names used by different TW versions
+          var m = html.match(/name="h" value="([^"]+)"/) ||
+                  html.match(/name="csrf_token" value="([^"]+)"/) ||
+                  html.match(/"csrf"\s*:\s*"([^"]+)"/);
           resolve(m ? m[1] : '');
         },
         error: function() { resolve(''); }
@@ -243,26 +274,30 @@
       var target = coordToXY(toCoord);
       if (!target) return reject('Invalid target coords');
       if (settings.dryRun) {
-        addLog('[DRY RUN] ' + fromVillageId + ' -> ' + toCoord + ': W' + wood + ' C' + clay + ' I' + iron, 'dry');
+        addLog('[DRY RUN] VID:' + fromVillageId + ' -> ' + toCoord + ': W' + wood + ' C' + clay + ' I' + iron, 'dry');
         return resolve({ dry: true });
       }
-      $.ajax({ url: '/game.php?village=' + fromVillageId + '&screen=market&mode=send', method: 'POST',
+      $.ajax({
+        url: '/game.php?village=' + fromVillageId + '&screen=market&mode=send',
+        method: 'POST',
         data: { x: target.x, y: target.y, wood: wood, stone: clay, iron: iron, h: token, submit: 'Versenden' },
-        success: function(d) { resolve(d); }, error: reject });
+        success: function(d) { resolve(d); },
+        error: reject
+      });
     });
   }
 
-  // ── Core routing logic ────────────────────────────────────────────────────
+  // ── Core routing ─────────────────────────────────────────────────────────
   async function runRouter() {
-    addLog('>> Starting Resource Router v2.4.0...', 'info');
+    addLog('>> Resource Router v2.5.0 starting...', 'info');
+
     var targetXY = coordToXY(settings.targetCoords);
     if (!targetXY) { addLog('ERROR: Invalid target coordinates!', 'error'); return; }
 
-    var villages = await fetchGroupVillages(settings.groupId);
-    if (!villages || !villages.length) { addLog('ERROR: No villages found.', 'error'); return; }
-    addLog('Processing ' + villages.length + ' villages.', 'info');
+    var villages = await fetchAllVillages();
+    if (!villages || villages.length === 0) { addLog('ERROR: No villages found.', 'error'); return; }
+    addLog('Loaded ' + villages.length + ' villages. Probing markets...', 'info');
 
-    addLog('Probing markets (this takes a moment)...', 'info');
     var marketData = {};
     for (var i = 0; i < villages.length; i++) {
       var v = villages[i];
@@ -271,13 +306,13 @@
         marketData[v.id] = Object.assign({}, mkt, { id: v.id, name: v.name, coord: v.coord });
         addLog('  ' + v.name + ' (' + v.coord + '): ' + mkt.merchants_available + '/' + mkt.merchants_total + ' traders | W' + mkt.wood + ' C' + mkt.clay + ' I' + mkt.iron, 'info');
       } else {
-        addLog('  WARN: Could not fetch market for ' + v.name, 'warn');
+        addLog('  WARN: No market data for ' + v.name, 'warn');
       }
     }
 
     var bigVillages   = villages.filter(function(v) { return marketData[v.id] && marketData[v.id].merchants_total > settings.smallMarketMax; });
     var smallVillages = villages.filter(function(v) { return marketData[v.id] && marketData[v.id].merchants_total <= settings.smallMarketMax; });
-    addLog('Big markets: ' + bigVillages.length + ' | Small markets: ' + smallVillages.length, 'info');
+    addLog('Big markets: ' + bigVillages.length + ' | Small: ' + smallVillages.length, 'info');
 
     function computeSend(mkt, destCoord, label) {
       var aw = Math.max(0, mkt.wood - settings.reserveWood);
@@ -291,10 +326,9 @@
         si = Math.min(ai, Math.floor(cap * settings.sendRatio.iron / 100));
         var left = Math.max(0, cap - sw - sc - si);
         if (left > 0) {
-          var ew = Math.min(aw - sw, Math.floor(left / 3));
-          var ec = Math.min(ac - sc, Math.floor(left / 3));
-          var ei = Math.min(ai - si, left - ew - ec);
-          sw += ew; sc += ec; si += ei;
+          sw += Math.min(aw - sw, Math.floor(left / 3));
+          sc += Math.min(ac - sc, Math.floor(left / 3));
+          si += Math.min(ai - si, Math.max(0, left - Math.floor(left/3)*2));
         }
       } else {
         sw = Math.min(aw, Math.floor(cap / 3));
@@ -306,41 +340,36 @@
 
     var sendPlan = [];
 
-    for (var b = 0; b < bigVillages.length; b++) {
-      var bv = bigVillages[b]; var bm = marketData[bv.id];
-      if (!bm || bm.merchants_available < 1) { addLog('  SKIP ' + bv.name + ': no free traders.', 'warn'); continue; }
+    bigVillages.forEach(function(bv) {
+      var bm = marketData[bv.id];
+      if (!bm || bm.merchants_available < 1) { addLog('  SKIP ' + bv.name + ': no free traders.', 'warn'); return; }
       var bp = computeSend(bm, settings.targetCoords, 'direct->target');
-      if (bp.send_w + bp.send_c + bp.send_i < 1) { addLog('  SKIP ' + bv.name + ': nothing above reserve.', 'warn'); continue; }
+      if (bp.send_w + bp.send_c + bp.send_i < 1) { addLog('  SKIP ' + bv.name + ': nothing above reserve.', 'warn'); return; }
       sendPlan.push({ village: bv, plan: bp });
-    }
+    });
 
-    for (var s = 0; s < smallVillages.length; s++) {
-      var sv = smallVillages[s]; var sm = marketData[sv.id];
-      if (!sm || sm.merchants_available < 1) { addLog('  SKIP ' + sv.name + ' (small): no traders.', 'warn'); continue; }
+    smallVillages.forEach(function(sv) {
+      var sm = marketData[sv.id];
+      if (!sm || sm.merchants_available < 1) { addLog('  SKIP ' + sv.name + ': no traders.', 'warn'); return; }
       var svXY = coordToXY(sv.coord);
-      var distToTarget = distance(svXY, targetXY);
+      var dtt = distance(svXY, targetXY);
       var bestRelay = null, bestDist = Infinity;
-      for (var r = 0; r < bigVillages.length; r++) {
-        var bxy = coordToXY(bigVillages[r].coord);
-        if (!bxy) continue;
-        var rd = distance(svXY, bxy);
-        if (rd < bestDist) { bestDist = rd; bestRelay = bigVillages[r]; }
-      }
-      var destCoord, destLabel;
-      if (!bestRelay || distToTarget <= bestDist + settings.relayThreshold) {
-        destCoord = settings.targetCoords; destLabel = 'small->direct->target';
+      bigVillages.forEach(function(bv) {
+        var d = distance(svXY, coordToXY(bv.coord));
+        if (d < bestDist) { bestDist = d; bestRelay = bv; }
+      });
+      var dest, label;
+      if (!bestRelay || dtt <= bestDist + settings.relayThreshold) {
+        dest = settings.targetCoords; label = 'small->direct->target';
       } else {
         var rm = marketData[bestRelay.id];
-        if (!rm || rm.merchants_available * TRADER_CARRY < settings.relayThreshold * TRADER_CARRY) {
-          destCoord = settings.targetCoords; destLabel = 'small->direct(relay-full)->target';
-        } else {
-          destCoord = bestRelay.coord; destLabel = 'small->relay[' + bestRelay.name + ']->target';
-        }
+        dest = (rm && rm.merchants_available > settings.relayThreshold) ? bestRelay.coord : settings.targetCoords;
+        label = (dest === bestRelay.coord) ? 'small->relay[' + bestRelay.name + ']' : 'small->direct(relay-full)';
       }
-      var sp = computeSend(sm, destCoord, destLabel);
-      if (sp.send_w + sp.send_c + sp.send_i < 1) { addLog('  SKIP ' + sv.name + ': nothing above reserve.', 'warn'); continue; }
+      var sp = computeSend(sm, dest, label);
+      if (sp.send_w + sp.send_c + sp.send_i < 1) { addLog('  SKIP ' + sv.name + ': nothing above reserve.', 'warn'); return; }
       sendPlan.push({ village: sv, plan: sp });
-    }
+    });
 
     addLog('---------------------------------', 'info');
     addLog('Send Plan: ' + sendPlan.length + ' villages', 'info');
@@ -349,13 +378,13 @@
     for (var p = 0; p < sendPlan.length; p++) {
       var entry = sendPlan[p]; var ep = entry.plan;
       totalW += ep.send_w; totalC += ep.send_c; totalI += ep.send_i;
-      addLog('  SEND ' + entry.village.name + ' (' + entry.village.coord + ') [' + ep.label + ']: W' + ep.send_w + ' C' + ep.send_c + ' I' + ep.send_i + ' -> ' + ep.dest, 'send');
+      addLog('  >> ' + entry.village.name + ' (' + entry.village.coord + ') [' + ep.label + ']: W' + ep.send_w + ' C' + ep.send_c + ' I' + ep.send_i + ' -> ' + ep.dest, 'send');
       if (!settings.dryRun) {
         var token = await getCsrfToken(entry.village.id);
-        if (!token) { addLog('    WARN: No CSRF token for ' + entry.village.name, 'warn'); continue; }
+        if (!token) { addLog('    WARN: No token for ' + entry.village.name, 'warn'); continue; }
         try {
           await sendResources(entry.village.id, ep.dest, ep.send_w, ep.send_c, ep.send_i, token);
-          addLog('    OK: Sent from ' + entry.village.name, 'success');
+          addLog('    OK: ' + entry.village.name, 'success');
         } catch(err) {
           addLog('    FAIL: ' + entry.village.name + ': ' + err, 'error');
         }
@@ -364,11 +393,11 @@
     }
 
     addLog('---------------------------------', 'info');
-    addLog('DONE' + (settings.dryRun ? ' (DRY RUN - nothing sent)' : '') + '. Total: W' + totalW + ' C' + totalC + ' I' + totalI, 'success');
+    addLog('DONE' + (settings.dryRun ? ' (DRY RUN)' : '') + ' | W' + totalW + ' C' + totalC + ' I' + totalI, 'success');
   }
 
   // ── CSS ───────────────────────────────────────────────────────────────────
-  var CSS = '#rr-container{position:fixed;top:60px;right:0;width:380px;max-height:92vh;background:linear-gradient(170deg,#1a120a 0%,#251808 60%,#1c110a 100%);border:2px solid #7c4a0a;border-right:none;border-radius:10px 0 0 10px;box-shadow:-4px 4px 20px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,180,60,.15);font-family:Georgia,"Palatino Linotype",serif;color:#d4a855;z-index:99999;display:flex;flex-direction:column;transition:transform .3s ease;}#rr-container.rr-collapsed{transform:translateX(360px);}#rr-header{background:linear-gradient(90deg,#3a1e00,#5c2e00);border-radius:8px 0 0 0;padding:9px 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #7c4a0a;cursor:pointer;user-select:none;}#rr-header h2{margin:0;font-size:14px;color:#f0c060;text-shadow:0 0 8px rgba(240,160,40,.5);letter-spacing:.03em;}#rr-toggle-btn{background:none;border:none;color:#f0c060;font-size:18px;cursor:pointer;padding:0 4px;line-height:1;}#rr-body{overflow-y:auto;padding:12px 14px;flex:1;}.rr-section{margin-bottom:12px;background:rgba(0,0,0,.25);border:1px solid rgba(124,74,10,.4);border-radius:6px;padding:10px 12px;}.rr-section-title{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#b07830;margin-bottom:8px;font-weight:bold;}.rr-row{display:flex;align-items:center;margin-bottom:7px;gap:8px;}.rr-row label{font-size:12px;color:#c8903a;flex:1;}.rr-row input[type=text],.rr-row input[type=number],.rr-row select{background:#120b04;border:1px solid #6b3e0a;color:#f0c060;border-radius:4px;padding:4px 7px;font-size:12px;font-family:monospace;width:110px;outline:none;}.rr-row input:focus,.rr-row select:focus{border-color:#d4a855;}.rr-row input[type=checkbox]{accent-color:#d4a855;width:16px;height:16px;}.rr-ratio-row{display:flex;gap:8px;align-items:center;margin-bottom:6px;}.rr-ratio-row label{font-size:11px;color:#a07028;width:34px;}.rr-ratio-row input{width:54px;}#rr-run-btn{width:100%;padding:10px;background:linear-gradient(180deg,#7a3e00,#5a2800);border:1px solid #c07020;border-radius:6px;color:#f8d070;font-size:14px;font-weight:bold;font-family:Georgia,serif;letter-spacing:.06em;cursor:pointer;text-shadow:0 1px 3px rgba(0,0,0,.5);transition:background .15s,box-shadow .15s;margin-bottom:10px;}#rr-run-btn:hover{background:linear-gradient(180deg,#9a5000,#7a3800);box-shadow:0 0 12px rgba(200,120,30,.4);}#rr-run-btn:active{transform:scale(.98);}#rr-log{background:#0d0700;border:1px solid rgba(100,60,5,.5);border-radius:5px;padding:8px;max-height:200px;overflow-y:auto;font-family:"Courier New",monospace;font-size:11px;}.rr-log-entry{padding:2px 0;border-bottom:1px solid rgba(100,60,5,.2);}.rr-log-ts{color:#5a4020;margin-right:4px;}.rr-log-info{color:#b09050;}.rr-log-warn{color:#e0a030;}.rr-log-error{color:#e05030;}.rr-log-send{color:#80c0e0;}.rr-log-success{color:#60c060;}.rr-log-dry{color:#9060c0;}#rr-footer{text-align:center;font-size:10px;color:#5a3a10;padding:6px 0 8px;letter-spacing:.08em;border-top:1px solid rgba(100,60,5,.3);}#rr-footer span{color:#8a5a20;}.rr-tab-bar{display:flex;gap:2px;margin-bottom:10px;}.rr-tab{flex:1;padding:5px;text-align:center;font-size:11px;background:rgba(0,0,0,.3);border:1px solid rgba(100,60,5,.4);border-radius:4px;cursor:pointer;color:#8a6030;transition:background .15s;}.rr-tab.active{background:rgba(120,70,0,.5);color:#f0c060;border-color:#c07020;}.rr-tab-content{display:none;}.rr-tab-content.active{display:block;}#rr-collapse-hint{position:absolute;left:-28px;top:50%;transform:translateY(-50%);background:#3a1e00;border:1px solid #7c4a0a;border-right:none;border-radius:6px 0 0 6px;padding:10px 5px;cursor:pointer;color:#f0c060;font-size:14px;writing-mode:vertical-lr;user-select:none;}.rr-note{font-size:10px;color:#6a4020;margin-top:3px;}';
+  var CSS = '#rr-container{position:fixed;top:60px;right:0;width:380px;max-height:92vh;background:linear-gradient(170deg,#1a120a 0%,#251808 60%,#1c110a 100%);border:2px solid #7c4a0a;border-right:none;border-radius:10px 0 0 10px;box-shadow:-4px 4px 20px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,180,60,.15);font-family:Georgia,"Palatino Linotype",serif;color:#d4a855;z-index:99999;display:flex;flex-direction:column;transition:transform .3s ease;}#rr-container.rr-collapsed{transform:translateX(360px);}#rr-header{background:linear-gradient(90deg,#3a1e00,#5c2e00);border-radius:8px 0 0 0;padding:9px 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #7c4a0a;cursor:pointer;user-select:none;}#rr-header h2{margin:0;font-size:14px;color:#f0c060;text-shadow:0 0 8px rgba(240,160,40,.5);letter-spacing:.03em;}#rr-toggle-btn{background:none;border:none;color:#f0c060;font-size:18px;cursor:pointer;padding:0 4px;line-height:1;}#rr-body{overflow-y:auto;padding:12px 14px;flex:1;}.rr-section{margin-bottom:12px;background:rgba(0,0,0,.25);border:1px solid rgba(124,74,10,.4);border-radius:6px;padding:10px 12px;}.rr-section-title{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#b07830;margin-bottom:8px;font-weight:bold;}.rr-row{display:flex;align-items:center;margin-bottom:7px;gap:8px;}.rr-row label{font-size:12px;color:#c8903a;flex:1;}.rr-row input[type=text],.rr-row input[type=number],.rr-row select{background:#120b04;border:1px solid #6b3e0a;color:#f0c060;border-radius:4px;padding:4px 7px;font-size:12px;font-family:monospace;width:110px;outline:none;}.rr-row input:focus,.rr-row select:focus{border-color:#d4a855;}.rr-row input[type=checkbox]{accent-color:#d4a855;width:16px;height:16px;}.rr-ratio-row{display:flex;gap:8px;align-items:center;margin-bottom:6px;}.rr-ratio-row label{font-size:11px;color:#a07028;width:34px;}.rr-ratio-row input{width:54px;}#rr-run-btn{width:100%;padding:10px;background:linear-gradient(180deg,#7a3e00,#5a2800);border:1px solid #c07020;border-radius:6px;color:#f8d070;font-size:14px;font-weight:bold;font-family:Georgia,serif;letter-spacing:.06em;cursor:pointer;text-shadow:0 1px 3px rgba(0,0,0,.5);transition:background .15s,box-shadow .15s;margin-bottom:10px;}#rr-run-btn:hover{background:linear-gradient(180deg,#9a5000,#7a3800);box-shadow:0 0 12px rgba(200,120,30,.4);}#rr-run-btn:active{transform:scale(.98);}#rr-log{background:#0d0700;border:1px solid rgba(100,60,5,.5);border-radius:5px;padding:8px;max-height:220px;overflow-y:auto;font-family:"Courier New",monospace;font-size:11px;}.rr-log-entry{padding:2px 0;border-bottom:1px solid rgba(100,60,5,.2);}.rr-log-ts{color:#5a4020;margin-right:4px;}.rr-log-info{color:#b09050;}.rr-log-warn{color:#e0a030;}.rr-log-error{color:#e05030;}.rr-log-send{color:#80c0e0;}.rr-log-success{color:#60c060;}.rr-log-dry{color:#9060c0;}#rr-footer{text-align:center;font-size:10px;color:#5a3a10;padding:6px 0 8px;letter-spacing:.08em;border-top:1px solid rgba(100,60,5,.3);}#rr-footer span{color:#8a5a20;}.rr-tab-bar{display:flex;gap:2px;margin-bottom:10px;}.rr-tab{flex:1;padding:5px;text-align:center;font-size:11px;background:rgba(0,0,0,.3);border:1px solid rgba(100,60,5,.4);border-radius:4px;cursor:pointer;color:#8a6030;transition:background .15s;}.rr-tab.active{background:rgba(120,70,0,.5);color:#f0c060;border-color:#c07020;}.rr-tab-content{display:none;}.rr-tab-content.active{display:block;}#rr-collapse-hint{position:absolute;left:-28px;top:50%;transform:translateY(-50%);background:#3a1e00;border:1px solid #7c4a0a;border-right:none;border-radius:6px 0 0 6px;padding:10px 5px;cursor:pointer;color:#f0c060;font-size:14px;writing-mode:vertical-lr;user-select:none;}.rr-note{font-size:10px;color:#6a4020;margin-top:3px;}';
 
   // ── Build UI ──────────────────────────────────────────────────────────────
   function buildUI() {
@@ -389,8 +418,7 @@
         '<div class="rr-tab-content active" id="rr-tab-settings">' +
           '<div class="rr-section"><div class="rr-section-title">&#127919; Target</div>' +
             '<div class="rr-row"><label>Target Coords</label><input type="text" id="rr-target" placeholder="564|417" value="' + settings.targetCoords + '"></div>' +
-            '<div class="rr-row"><label>Village Group</label><select id="rr-group"><option value="0">Loading...</option></select></div>' +
-            '<div class="rr-note">Groups load from overview page. Use "All Villages" if none appear.</div>' +
+            '<div class="rr-note">All your villages will be used. Groups are not supported on this server version.</div>' +
           '</div>' +
           '<div class="rr-section"><div class="rr-section-title">&#127846; Reserves (keep per village)</div>' +
             '<div class="rr-row"><label>Wood</label><input type="number" id="rr-res-wood" value="' + settings.reserveWood + '" min="0"></div>' +
@@ -401,7 +429,7 @@
             '<div class="rr-ratio-row"><label>W</label><input type="number" id="rr-ratio-wood" value="' + settings.sendRatio.wood + '" min="0" max="100"></div>' +
             '<div class="rr-ratio-row"><label>C</label><input type="number" id="rr-ratio-clay" value="' + settings.sendRatio.clay + '" min="0" max="100"></div>' +
             '<div class="rr-ratio-row"><label>I</label><input type="number" id="rr-ratio-iron" value="' + settings.sendRatio.iron + '" min="0" max="100"></div>' +
-            '<div class="rr-note">Must sum to 100. Leftover capacity auto-fills.</div>' +
+            '<div class="rr-note">Must sum to 100.</div>' +
           '</div>' +
           '<div class="rr-section"><div class="rr-section-title">&#128256; Relay Settings</div>' +
             '<div class="rr-row"><label>Small market limit</label><input type="number" id="rr-small-max" value="' + settings.smallMarketMax + '" min="1"></div>' +
@@ -415,27 +443,24 @@
           '<button id="rr-run-btn">&#9654; SEND RESOURCES</button>' +
         '</div>' +
         '<div class="rr-tab-content" id="rr-tab-log">' +
-          '<div id="rr-log"><div id="rr-log-body" style="color:#5a4020;font-style:italic;">Log will appear here after running...</div></div>' +
+          '<div id="rr-log"><div id="rr-log-body" style="color:#5a4020;font-style:italic;">Log will appear here...</div></div>' +
           '<div style="margin-top:6px;text-align:right;"><button id="rr-clear-log" style="background:#1a0d00;border:1px solid #5a3010;color:#a06020;border-radius:4px;padding:3px 10px;cursor:pointer;font-size:11px;">Clear Log</button></div>' +
         '</div>' +
         '<div class="rr-tab-content" id="rr-tab-help">' +
           '<div class="rr-section" style="font-size:11px;color:#b09050;line-height:1.7;">' +
             '<b style="color:#f0c060;">How it works:</b><br>' +
             '1. Enter target coords (e.g. 564|417).<br>' +
-            '2. Choose a group, or leave on "All Villages".<br>' +
-            '3. Set reserves - each village keeps this amount.<br>' +
-            '4. Set W/C/I ratio (must sum to 100).<br>' +
-            '5. Villages with traders &lt;= small market limit relay via a nearby big-market village.<br>' +
-            '6. Enable Dry Run first to preview, then disable to send for real.<br>' +
-            '7. Press SEND RESOURCES.<br><br>' +
-            '<b style="color:#f0c060;">Note:</b> Villages are loaded by scraping the overview page directly - no API needed.' +
+            '2. Set reserves - each village keeps this amount.<br>' +
+            '3. Set W/C/I ratio (must sum to 100).<br>' +
+            '4. Villages with traders &lt;= small market limit relay via a nearby big-market village.<br>' +
+            '5. Enable Dry Run first to preview, then disable to send for real.<br>' +
+            '6. Press SEND RESOURCES.' +
           '</div>' +
         '</div>' +
       '</div>' +
-      '<div id="rr-footer">Made by <span>Sotnos</span> &bull; v2.4.0</div>';
+      '<div id="rr-footer">Made by <span>Sotnos</span> &bull; v2.5.0</div>';
 
     document.body.appendChild(container);
-    loadGroupOptions();
 
     container.querySelectorAll('.rr-tab').forEach(function(tab) {
       tab.addEventListener('click', function() {
@@ -474,7 +499,6 @@
 
   function collectSettings() {
     settings.targetCoords   = document.getElementById('rr-target').value.trim();
-    settings.groupId        = document.getElementById('rr-group').value;
     settings.reserveWood    = parseInt(document.getElementById('rr-res-wood').value)    || 0;
     settings.reserveClay    = parseInt(document.getElementById('rr-res-clay').value)    || 0;
     settings.reserveIron    = parseInt(document.getElementById('rr-res-iron').value)    || 0;
@@ -487,33 +511,7 @@
     settings.dryRun         = document.getElementById('rr-dry-run').checked;
   }
 
-  async function loadGroupOptions() {
-    var sel = document.getElementById('rr-group');
-    sel.innerHTML = '<option value="0">-- All Villages --</option>';
-    var groups = await getGroups();
-    var added = 0;
-    groups.forEach(function(g) {
-      var gid = String(g.group_id || g.id || '');
-      if (!gid || gid === '0') return;
-      var name = (g.name || '').trim();
-      // Skip the "all villages" default entries in various languages
-      if (/^all\s*villages?$/i.test(name) || /^alle\s*D/i.test(name) || /^alla\s*bya/i.test(name)) return;
-      var opt = document.createElement('option');
-      opt.value = gid;
-      opt.textContent = name;
-      if (gid === String(settings.groupId)) opt.selected = true;
-      sel.appendChild(opt);
-      added++;
-    });
-    if (added === 0) {
-      sel.innerHTML = '<option value="0">-- All Villages (no groups found) --</option>';
-    }
-  }
-
-  if (!window.game_data) {
-    console.warn('TW Resource Router: not on a game page.');
-    return;
-  }
+  if (!window.game_data) { console.warn('TW Resource Router: not on a game page.'); return; }
   buildUI();
 
 })();
