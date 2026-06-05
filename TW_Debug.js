@@ -1,27 +1,22 @@
-// TW Resource Router - Debug Tool by Sotnos
+// TW Resource Router - Debug Tool v2 by Sotnos
 // Quickbar: javascript:$.getScript('https://cdn.jsdelivr.net/gh/sotnos-hub/TW-Resource-sender@main/TW_Debug.js');
 
 (function () {
   'use strict';
 
-  if (document.getElementById('rr-debug')) {
-    document.getElementById('rr-debug').remove();
-  }
+  if (document.getElementById('rr-debug')) document.getElementById('rr-debug').remove();
 
   var vid = window.game_data ? window.game_data.village.id : null;
-  var pid = window.game_data ? window.game_data.player.id : null;
+  if (!vid) { alert('No game_data! Run on a TW game page.'); return; }
 
-  if (!vid) { alert('No game_data found! Run this on a Tribal Wars game page.'); return; }
-
-  // Inject panel
   var panel = document.createElement('div');
   panel.id = 'rr-debug';
-  panel.style.cssText = 'position:fixed;top:50px;right:10px;width:420px;max-height:80vh;overflow-y:auto;background:#1a0d00;border:2px solid #7c4a0a;border-radius:8px;color:#d4a855;font-family:monospace;font-size:11px;z-index:99999;padding:12px;';
-  panel.innerHTML = '<b style="color:#f0c060;font-size:13px;">TW Debug Tool</b> <span style="color:#5a3a10;">vid=' + vid + ' pid=' + pid + '</span>' +
+  panel.style.cssText = 'position:fixed;top:50px;right:10px;width:480px;max-height:85vh;overflow-y:auto;background:#1a0d00;border:2px solid #7c4a0a;border-radius:8px;color:#d4a855;font-family:monospace;font-size:11px;z-index:99999;padding:12px;';
+  panel.innerHTML = '<b style="color:#f0c060;font-size:13px;">TW Market Debug v2</b> <span style="color:#5a3a10;">vid=' + vid + '</span>' +
     '<button onclick="document.getElementById(\'rr-debug\').remove()" style="float:right;background:#3a1e00;border:1px solid #7c4a0a;color:#f0c060;cursor:pointer;border-radius:4px;padding:2px 8px;">X</button>' +
     '<hr style="border-color:#3a2000;margin:8px 0;">' +
     '<div id="rr-dbg-btns" style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;"></div>' +
-    '<div id="rr-dbg-out" style="background:#0a0500;padding:8px;border-radius:4px;white-space:pre-wrap;word-break:break-all;color:#b09050;min-height:40px;">Click a test button above...</div>';
+    '<div id="rr-dbg-out" style="background:#0a0500;padding:8px;border-radius:4px;white-space:pre-wrap;word-break:break-all;color:#b09050;min-height:60px;">Click a button...</div>';
   document.body.appendChild(panel);
 
   var out = document.getElementById('rr-dbg-out');
@@ -36,101 +31,116 @@
     btns.appendChild(b);
   }
 
-  // Test 1: get_groups
-  btn('Test get_groups', function() {
-    log('Fetching /game.php?screen=overview_villages&action=get_groups ...');
-    $.ajax({ url: '/game.php?village=' + vid + '&screen=overview_villages&action=get_groups',
-      success: function(d) { log('RESULT:\n' + JSON.stringify(d, null, 2)); },
-      error: function(x) { log('ERROR: ' + x.status + ' ' + x.statusText); }
-    });
-  });
-
-  // Test 2: get_villages no group
-  btn('Test get_villages (all)', function() {
-    log('Fetching get_villages (no group)...');
-    $.ajax({ url: '/game.php?village=' + vid + '&screen=overview_villages&action=get_villages',
-      success: function(d) { log('RESULT:\n' + JSON.stringify(d, null, 2)); },
-      error: function(x) { log('ERROR: ' + x.status + ' ' + x.statusText); }
-    });
-  });
-
-  // Test 3: get_villages group=0
-  btn('Test get_villages group=0', function() {
-    log('Fetching get_villages&group_id=0...');
-    $.ajax({ url: '/game.php?village=' + vid + '&screen=overview_villages&action=get_villages&group_id=0',
-      success: function(d) { log('RESULT:\n' + JSON.stringify(d, null, 2)); },
-      error: function(x) { log('ERROR: ' + x.status + ' ' + x.statusText); }
-    });
-  });
-
-  // Test 4: overview_villages HTML scrape
-  btn('Scrape overview HTML', function() {
-    log('Fetching overview_villages page HTML...');
-    $.ajax({ url: '/game.php?village=' + vid + '&screen=overview_villages',
-      success: function(html) {
-        // Look for village links
-        var doc = new DOMParser().parseFromString(html, 'text/html');
-        var links = doc.querySelectorAll('a[href*="village="]');
-        var found = [];
-        links.forEach(function(a) {
-          var m = a.href.match(/village=(\d+)/);
-          var coord = (a.textContent + ' ' + (a.closest('tr') ? a.closest('tr').textContent : '')).match(/(\d{3,})\|(\d{3,})/);
-          if (m && coord && found.indexOf(m[1]) === -1) {
-            found.push(m[1]);
-          }
-        });
-        // Also look for group select
-        var grpSel = doc.querySelector('select[name="group"]') || doc.querySelector('#group_id');
-        var grpOptions = grpSel ? Array.from(grpSel.options).map(function(o){ return o.value + ': ' + o.text; }) : ['No group select found'];
-        log('Village IDs found in HTML: ' + found.length + '\n' + found.join(', ') +
-            '\n\nGroup select options:\n' + grpOptions.join('\n') +
-            '\n\nRaw snippet (first 2000 chars):\n' + html.substring(0, 2000));
-      },
-      error: function(x) { log('ERROR: ' + x.status + ' ' + x.statusText); }
-    });
-  });
-
-  // Test 5: info_player
-  btn('Test info_player', function() {
-    log('Fetching info_player villages...');
-    $.ajax({ url: '/game.php?village=' + vid + '&screen=info_player&ajax=load_villages_for_player&player_id=' + pid,
-      success: function(d) { log('RESULT:\n' + JSON.stringify(d, null, 2)); },
-      error: function(x) { log('ERROR: ' + x.status + ' ' + x.statusText); }
-    });
-  });
-
-  // Test 6: Check game_data
-  btn('Check game_data', function() {
-    var gd = window.game_data;
-    log('game_data.village: ' + JSON.stringify(gd.village, null, 2) +
-        '\ngame_data.player: ' + JSON.stringify(gd.player, null, 2) +
-        '\ngame_data.features (keys): ' + Object.keys(gd).join(', '));
-  });
-
-  // Test 7: TWstats village list
-  btn('Test TWstats endpoint', function() {
-    log('Fetching /game.php?screen=overview&action=overview_villages...');
-    $.ajax({ url: '/game.php?village=' + vid + '&screen=overview&action=overview_villages',
-      success: function(d) { log('RESULT:\n' + JSON.stringify(d, null, 2)); },
-      error: function(x) { log('ERROR: ' + x.status + ' ' + x.statusText); }
-    });
-  });
-
-  // Test 8: Ally overview
-  btn('Test ally/group list', function() {
-    log('Fetching ally overview...');
-    $.ajax({ url: '/game.php?village=' + vid + '&screen=overview_villages&mode=combined',
+  // Test 1: Fetch market send page and show ALL form fields
+  btn('Inspect market/send form', function() {
+    log('Fetching market send page...');
+    $.ajax({ url: '/game.php?village=' + vid + '&screen=market&mode=send',
       success: function(html) {
         var doc = new DOMParser().parseFromString(html, 'text/html');
-        var rows = doc.querySelectorAll('table#villages_list tr, table.vis tr');
-        var result = 'Rows found: ' + rows.length + '\n\n';
-        rows.forEach(function(row, i) {
-          if (i < 5) result += 'Row ' + i + ': ' + row.textContent.trim().substring(0, 120) + '\n';
+        var forms = doc.querySelectorAll('form');
+        var result = 'Forms found: ' + forms.length + '\n\n';
+        forms.forEach(function(form, fi) {
+          result += '--- Form ' + fi + ' ---\n';
+          result += 'action: ' + (form.action || form.getAttribute('action') || 'none') + '\n';
+          result += 'method: ' + (form.method || 'none') + '\n';
+          var inputs = form.querySelectorAll('input, select, textarea');
+          inputs.forEach(function(inp) {
+            result += '  [' + inp.type + '] name="' + inp.name + '" value="' + inp.value + '"\n';
+          });
+          result += '\n';
         });
-        result += '\n\nFirst 1500 chars of HTML:\n' + html.substring(0, 1500);
+        // Also show the h/csrf token
+        var hMatch = html.match(/name="h" value="([^"]+)"/);
+        var csrfMatch = html.match(/name="csrf[^"]*" value="([^"]+)"/i);
+        var gameDataCsrf = html.match(/"csrf"\s*:\s*"([^"]+)"/);
+        result += '\nToken search:\n';
+        result += 'name="h": ' + (hMatch ? hMatch[1] : 'NOT FOUND') + '\n';
+        result += 'name="csrf*": ' + (csrfMatch ? csrfMatch[1] : 'NOT FOUND') + '\n';
+        result += 'game_data.csrf: ' + (gameDataCsrf ? gameDataCsrf[1] : 'NOT FOUND') + '\n';
+        result += '\ngame_data.csrf directly: ' + (window.game_data.csrf || 'NOT FOUND') + '\n';
         log(result);
       },
       error: function(x) { log('ERROR: ' + x.status + ' ' + x.statusText); }
+    });
+  });
+
+  // Test 2: Fetch market/own page
+  btn('Inspect market/own form', function() {
+    log('Fetching market own page...');
+    $.ajax({ url: '/game.php?village=' + vid + '&screen=market&mode=own_offer',
+      success: function(html) {
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var forms = doc.querySelectorAll('form');
+        var result = 'Forms: ' + forms.length + '\n\n';
+        forms.forEach(function(form, fi) {
+          result += '--- Form ' + fi + ' action=' + (form.getAttribute('action') || 'none') + ' method=' + form.method + '\n';
+          form.querySelectorAll('input,select').forEach(function(inp) {
+            result += '  [' + inp.type + '] name="' + inp.name + '" value="' + (inp.value||'') + '"\n';
+          });
+        });
+        log(result);
+      },
+      error: function(x) { log('ERROR ' + x.status); }
+    });
+  });
+
+  // Test 3: Show game_data.csrf and market object
+  btn('game_data market/csrf', function() {
+    var gd = window.game_data;
+    log('game_data.csrf: ' + JSON.stringify(gd.csrf) +
+        '\ngame_data.market: ' + JSON.stringify(gd.market, null, 2) +
+        '\ngame_data.link_base: ' + gd.link_base);
+  });
+
+  // Test 4: Try actual send with game_data.csrf token to 523|396 (1 wood only, dry approach)
+  btn('Test POST to market/send (1 wood)', function() {
+    if (!confirm('This will attempt to send 1 wood from current village to 523|396. OK?')) return;
+    var csrf = window.game_data.csrf;
+    log('Attempting POST with csrf=' + csrf + '...');
+    $.ajax({
+      url: '/game.php?village=' + vid + '&screen=market&mode=send',
+      method: 'POST',
+      data: { x: 523, y: 396, wood: 1, stone: 0, iron: 0, h: csrf, submit: 'send' },
+      success: function(d) { log('POST RESPONSE (first 2000 chars):\n' + String(d).substring(0, 2000)); },
+      error: function(x) { log('POST ERROR: ' + x.status + ' ' + x.statusText + '\n' + x.responseText.substring(0,500)); }
+    });
+  });
+
+  // Test 5: Try with 'Versenden' submit value
+  btn('Test POST submit=Versenden', function() {
+    if (!confirm('This will attempt to send 1 wood. OK?')) return;
+    var csrf = window.game_data.csrf;
+    $.ajax({
+      url: '/game.php?village=' + vid + '&screen=market&mode=send',
+      method: 'POST',
+      data: { x: 523, y: 396, wood: 1, stone: 0, iron: 0, h: csrf, submit: 'Versenden' },
+      success: function(d) { log('POST RESPONSE:\n' + String(d).substring(0, 2000)); },
+      error: function(x) { log('POST ERROR: ' + x.status + '\n' + x.responseText.substring(0,500)); }
+    });
+  });
+
+  // Test 6: Check what the actual send form URL looks like in DOM right now
+  btn('Check current page forms', function() {
+    var forms = document.querySelectorAll('form');
+    var result = 'Forms on current page: ' + forms.length + '\n\n';
+    forms.forEach(function(form, fi) {
+      result += '--- Form ' + fi + ' ---\n';
+      result += 'action: ' + (form.getAttribute('action') || 'none') + '\n';
+      result += 'method: ' + form.method + '\n';
+      form.querySelectorAll('input,select').forEach(function(inp) {
+        result += '  [' + inp.type + '] name="' + inp.name + '" value="' + (inp.value||'') + '"\n';
+      });
+      result += '\n';
+    });
+    log(result);
+  });
+
+  // Test 7: Show raw market send HTML (first 3000 chars)
+  btn('Raw market/send HTML', function() {
+    log('Fetching...');
+    $.ajax({ url: '/game.php?village=' + vid + '&screen=market&mode=send',
+      success: function(html) { log(html.substring(0, 3000)); },
+      error: function(x) { log('ERROR ' + x.status); }
     });
   });
 
